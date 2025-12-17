@@ -1,6 +1,6 @@
 const axios = require('axios');
 const Groq = require('groq-sdk');
-const { getCache } = require('../utils/cache'); 
+const { getCache, setCache } = require('../utils/cache'); 
 const { logger } = require('../utils/logger');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY }); 
@@ -8,71 +8,102 @@ const CACHE_KEY_TRENDING = 'trending_news_ai_filtered';
 
 /**
  * 1. HELPER: Universal Normalizer
- * Standardizes different API response formats (NewsData vs GNews vs others)
  */
 function normalizeArticle(article, sourceName) {
+    const item = article.data || article;
+    
+    let link = item.link || item.url;
+    let source = sourceName || item.source_id || "Unknown";
+    let date = item.pubDate || item.publishedAt;
+
+    if (sourceName === 'Reddit') {
+        link = item.url.startsWith('http') ? item.url : `https://reddit.com${item.permalink}`;
+        source = `r/${item.subreddit}`;
+        date = item.created_utc ? new Date(item.created_utc * 1000).toISOString() : new Date().toISOString();
+    }
+
     return {
-        title: article.title || article.name || "No Title",
-        description: article.description || article.snippet || article.content || "",
-        link: article.link || article.url,
-        source: sourceName || article.source_id || article.source?.name || "Unknown",
-        pubDate: article.pubDate || article.publishedAt,
-        ai_score: 1, // Default before processing
+        title: item.title || item.name || "No Title",
+        description: (item.selftext || item.description || item.snippet || "").substring(0, 300),
+        link: link,
+        source: source,
+        pubDate: date,
+        ai_score: 1,
         ai_summary: '',
-        ai_category: ''
+        ai_category: '',
+        sentiment: 'Neutral'
     };
 }
 
 /**
- * 2. HELPER: De-duplicate articles by Title
+ * 2. HELPER: De-duplicate
  */
 function deduplicateArticles(articles) {
     const seenTitles = new Set();
     return articles.filter(article => {
         const title = article.title?.toLowerCase().trim();
-        if (seenTitles.has(title)) return false;
+        if (!title || seenTitles.has(title)) return false;
         seenTitles.add(title);
         return true;
     });
 }
 
 /**
- * 3. HELPER: Batch AI Scoring
+ * 3. HELPER: Batch AI Scoring with Usage Tracking
  */
 async function batchScoreArticles(articles) {
     if (!articles || articles.length === 0) return [];
 
-    const articlesList = articles.map((a, i) => `[ID: ${i}] Title: ${a.title}`).join('\n');
-    const prompt = `Analyze these ${articles.length} news articles. Output a JSON object with a key "results" containing an array of objects. 
-    Each object MUST have: "id" (the number provided), "score" (1-10 relevance to Tech/AI/Web3), "summary" (1-sentence), and "category" (AI/ML, Web3, or Other).
+    const articlesList = articles.map((a, i) => 
+        `ID: ${i}\nTitle: ${a.title}\nDescription: ${a.description.substring(0, 150)}`
+    ).join('\n---\n');
+
+    const prompt = `You are a tech news analyzer. Analyze these ${articles.length} news items.
+    Return a JSON object with exactly one key "results" containing an array of objects.
+    
+    Each object MUST have:
+    - "id": (The number provided)
+    - "score": (1-10 rating of Tech/AI relevance)
+    - "summary": (1 short sentence)
+    - "category": ("AI", "Web3", "Software", or "Tech")
+    - "sentiment": ("Bullish", "Bearish", or "Neutral")
 
     Articles:
     ${articlesList}`;
 
     try {
         const chatCompletion = await groq.chat.completions.create({
-            messages: [{ role: 'user', content: prompt }],
+            messages: [
+                { role: 'system', content: 'You only output valid JSON.' },
+                { role: 'user', content: prompt }
+            ],
             model: 'llama-3.1-8b-instant',
             response_format: { type: 'json_object' },
             temperature: 0.1,
         });
 
+        // --- LOG GROQ USAGE ---
         const usage = chatCompletion.usage;
-        logger.info(`[Groq Usage] Tokens: ${usage.total_tokens}`);
+        if (usage) {
+            logger.info(`[AI USAGE] Tokens: ${usage.total_tokens} | Prompt: ${usage.prompt_tokens} | Completion: ${usage.completion_tokens}`);
+        }
 
         const aiResults = JSON.parse(chatCompletion.choices[0].message.content).results;
 
         return articles.map((article, index) => {
-            const ai = aiResults.find(r => r.id === index) || {};
+            const ai = aiResults.find(r => r.id === index);
+            if (!ai) return article;
+
             return {
                 ...article,
                 ai_score: ai.score || 1,
                 ai_summary: ai.summary || 'Summary unavailable.',
-                ai_category: ai.category || 'Other'
+                ai_category: ai.category || 'Tech',
+                sentiment: ai.sentiment || 'Neutral'
             };
         });
     } catch (error) {
-        logger.error("Batch AI Analysis failed:", error.message);
+        logger.error("AI Analysis failed: " + error.message);
         return articles;
     }
 }
@@ -84,56 +115,91 @@ async function searchNews(req, res) {
     const { q } = req.query;
     if (!q) return res.status(400).json({ message: 'Search query "q" is required.' });
 
-    try {
-        // 1. Check Redis Cache first
-        const cachedArticles = await getCache(CACHE_KEY_TRENDING) || [];
-        const cachedResults = cachedArticles.filter(a => a.title?.toLowerCase().includes(q.toLowerCase()));
+    const QUERY_CACHE_KEY = `search_cache:${q.toLowerCase().trim()}`;
 
-        // 2. Prepare Parallel API Tasks
+    try {
+        // 1. Check Redis Cache
+        const cachedSearch = await getCache(QUERY_CACHE_KEY);
+        if (cachedSearch) {
+            logger.info(`[Redis] Cache Hit: ${q}`);
+            return res.json(cachedSearch);
+        }
+
+        // 2. Parallel API Tasks
         const apiTasks = [];
 
-        // Task: NewsData.io
+        // NewsData.io (Logging Status)
         if (process.env.NEWSDATA_API_KEY) {
             apiTasks.push(
                 axios.get(`https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}&qInTitle=${encodeURIComponent(q)}&language=en&size=10`)
                 .then(r => {
-                    logger.info(`[NewsData.io] Remaining Credits: ${r.headers['x-ratelimit-remaining']}`);
+                    logger.info(`[API USAGE] NewsData: Success | Results: ${r.data.totalResults || 0}`);
                     return (r.data.results || []).map(a => normalizeArticle(a, 'NewsData'));
                 })
+                .catch(e => { logger.error(`NewsData failed: ${e.message}`); return []; })
             );
         }
 
-        // Task: GNews.io (Optional fallback)
+        // GNews.io
         if (process.env.GNEWS_API_KEY) {
             apiTasks.push(
                 axios.get(`https://gnews.io/api/v4/search?q=${encodeURIComponent(q)}&token=${process.env.GNEWS_API_KEY}&lang=en`)
-                .then(r => (r.data.articles || []).map(a => normalizeArticle(a, 'GNews')))
+                .then(r => {
+                    logger.info(`[API USAGE] GNews: Success`);
+                    return (r.data.articles || []).map(a => normalizeArticle(a, 'GNews'));
+                })
+                .catch(e => { logger.error(`GNews failed: ${e.message}`); return []; })
             );
         }
 
-        // 3. Execute APIs in Parallel
+        // Reddit: Tracking Rate Limits
+        apiTasks.push(
+            axios.get(`https://www.reddit.com/search.json?q=${encodeURIComponent(q)}&limit=12&sort=relevance&t=month`, {
+                headers: { 'User-Agent': 'AI-News-Aggregator/1.0' } 
+            })
+            .then(r => {
+                const remaining = r.headers['x-ratelimit-remaining'];
+                const reset = r.headers['x-ratelimit-reset'];
+                logger.info(`[API USAGE] Reddit: Success | RateLimit Remaining: ${remaining} | Resets in: ${reset}s`);
+                return (r.data.data.children || []).map(a => normalizeArticle(a, 'Reddit'));
+            })
+            .catch(e => { logger.error(`Reddit failed: ${e.message}`); return []; })
+        );
+
+        // 3. Resolve Parallel Requests
         const taskResults = await Promise.allSettled(apiTasks);
         const liveArticles = taskResults
             .filter(res => res.status === 'fulfilled')
             .map(res => res.value)
             .flat();
 
-        // 4. Combine, Deduplicate, and AI Score
-        const combinedRaw = [...cachedResults, ...liveArticles];
-        const uniqueArticles = deduplicateArticles(combinedRaw);
-        
-        // Only AI Score the top 12 to save tokens
-        const finalResults = await batchScoreArticles(uniqueArticles.slice(0, 12));
+        // 4. Combine & Deduplicate
+        const trendingCache = await getCache(CACHE_KEY_TRENDING) || [];
+        const cachedMatches = trendingCache.filter(a => a.title?.toLowerCase().includes(q.toLowerCase()));
+        const uniqueArticles = deduplicateArticles([...cachedMatches, ...liveArticles]);
 
-        return res.json({
+        // 5. AI Scoring (Usage is logged inside this function)
+        const scoredArticles = await batchScoreArticles(uniqueArticles.slice(0, 15));
+
+        // 6. Quality Filtering
+        const finalResults = scoredArticles
+            .filter(a => a.ai_score >= 3)
+            .sort((a, b) => b.ai_score - a.ai_score);
+
+        const responsePayload = {
             query: q,
             count: finalResults.length,
-            articles: finalResults.sort((a, b) => b.ai_score - a.ai_score)
-        });
+            articles: finalResults
+        };
+
+        // 7. Store in Cache
+        await setCache(QUERY_CACHE_KEY, responsePayload, 1800);
+
+        return res.json(responsePayload);
 
     } catch (error) {
-        logger.error('Search failed:', error.message);
-        return res.status(500).json({ message: 'Internal server error during search.' });
+        logger.error('Search error: ' + error.message);
+        return res.status(500).json({ message: 'Internal server error.' });
     }
 }
 
@@ -144,10 +210,12 @@ async function getTrendingNews(req, res) {
     try {
         const filteredArticles = await getCache(CACHE_KEY_TRENDING);
         if (!filteredArticles) return res.status(404).json({ message: 'No data.' });
-        const sorted = filteredArticles.sort((a, b) => b.ai_score - a.ai_score);
-        return res.json({ count: sorted.length, articles: sorted });
+        return res.json({ 
+            count: filteredArticles.length, 
+            articles: filteredArticles.sort((a, b) => b.ai_score - a.ai_score) 
+        });
     } catch (error) {
-        return res.status(500).json({ message: 'Error' });
+        return res.status(500).json({ message: 'Error fetching trending news.' });
     }
 }
 
