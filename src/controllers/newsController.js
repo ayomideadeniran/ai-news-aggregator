@@ -246,9 +246,19 @@ async function getTrendingNews(req, res) {
             const cachedFilteredNews = await getCache(AI_FILTERED_CACHE_KEY);
             if (cachedFilteredNews) {
                 logger.info('Returning AI-filtered results from cache.');
+
+                const page = parseInt(req.query.page) || 1;
+                const limit = parseInt(req.query.limit) || 10;
+                const startIndex = (page - 1) * limit;
+                const endIndex = page * limit;
+                const paginatedArticles = cachedFilteredNews.slice(startIndex, endIndex);
+
                 return res.json({
                     count: cachedFilteredNews.length,
-                    articles: cachedFilteredNews
+                    page,
+                    limit,
+                    hasMore: endIndex < cachedFilteredNews.length,
+                    articles: paginatedArticles
                 });
             }
         }
@@ -281,9 +291,19 @@ async function getTrendingNews(req, res) {
 
             await setCache(AI_FILTERED_CACHE_KEY, highQualityNews, CACHE_EXPIRY_SECONDS);
 
+            const page = parseInt(req.query.page) || 1;
+            const limit = parseInt(req.query.limit) || 10;
+            const startIndex = (page - 1) * limit;
+            const endIndex = page * limit;
+
+            const paginatedArticles = highQualityNews.slice(startIndex, endIndex);
+
             return res.json({
                 count: highQualityNews.length,
-                articles: highQualityNews
+                page,
+                limit,
+                hasMore: endIndex < highQualityNews.length,
+                articles: paginatedArticles
             });
         }
 
