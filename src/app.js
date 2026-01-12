@@ -1,6 +1,7 @@
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
+const path = require('path');
 const trendingRoutes = require('./routes/trending');
 const { limiter } = require('./middleware/rateLimiter');
 const { logger } = require('./utils/logger');
@@ -9,8 +10,10 @@ const { logger } = require('./utils/logger');
 const app = express();
 
 // --- Security and Middleware ---
-// Basic security settings
-app.use(helmet());
+// Basic security settings - adjusted for SPA
+app.use(helmet({
+    contentSecurityPolicy: false, // Disable CSP for simplicity in this demo, or configure it properly
+}));
 
 // Enable CORS for all origins
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'HEAD'] }));
@@ -27,16 +30,21 @@ app.use((req, res, next) => {
     next();
 });
 
-// --- Routes ---
+// --- API Routes ---
 app.use('/api/v1/trending', trendingRoutes);
 
-// Simple health check route
-app.get('/', (req, res) => {
-    res.json({
-        service: 'AI News Aggregator API',
-        status: 'OK',
-        timestamp: new Date().toISOString()
-    });
+// --- Static Files & SPA Routing ---
+// Serve static files from the React app build folder
+const frontendPath = path.join(__dirname, '../frontend/dist');
+app.use(express.static(frontendPath));
+
+// Catch-all route to serve index.html for any non-API routes (SPA support)
+app.get('*', (req, res) => {
+    // If the request is for an API, don't serve index.html
+    if (req.path.startsWith('/api')) {
+        return res.status(404).json({ message: 'API route not found' });
+    }
+    res.sendFile(path.join(frontendPath, 'index.html'));
 });
 
 // --- Error Handling Middleware ---
