@@ -38,8 +38,8 @@ app.use('/api/v1/trending', trendingRoutes);
 const frontendPath = path.join(__dirname, '../frontend/dist');
 app.use(express.static(frontendPath));
 
-// Catch-all route to serve index.html for any non-API routes (SPA support)
-app.get('/:path*', (req, res) => {
+// Catch-all middleware to serve index.html for any non-API routes (SPA support)
+app.use((req, res) => {
     // If the request is for an API, don't serve index.html
     if (req.path.startsWith('/api')) {
         return res.status(404).json({ message: 'API route not found' });
