@@ -10,20 +10,29 @@ const app = express();
 
 // --- Security and Middleware ---
 // Basic security settings
-app.use(helmet()); 
+app.use(helmet());
 
-// Enable CORS for all origins (for simple API demo)
-app.use(cors({ origin: '*', methods: ['GET', 'HEAD'] }));
+// Enable CORS for all origins
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'HEAD'] }));
+
+// Parse JSON bodies
+app.use(express.json());
 
 // Rate limiting (max 20 requests/minute per IP)
 app.use(limiter);
+
+// Extract User ID from headers
+app.use((req, res, next) => {
+    req.userId = req.headers['x-user-id'] || 'anonymous';
+    next();
+});
 
 // --- Routes ---
 app.use('/api/v1/trending', trendingRoutes);
 
 // Simple health check route
 app.get('/', (req, res) => {
-    res.json({ 
+    res.json({
         service: 'AI News Aggregator API',
         status: 'OK',
         timestamp: new Date().toISOString()

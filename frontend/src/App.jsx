@@ -1,40 +1,49 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Zap, RefreshCw, AlertCircle, Filter } from 'lucide-react';
+import { Zap, RefreshCw, AlertCircle, Filter, Bookmark, TrendingUp } from 'lucide-react';
 import NewsCard from './components/NewsCard';
 import SearchBar from './components/SearchBar';
 import ThemeToggle from './components/ThemeToggle';
 import { ThemeProvider } from './context/ThemeContext';
+import { getUserId } from './utils/session';
 
 const CATEGORIES = ['All', 'AI/ML', 'Web3/Crypto', 'FinTech', 'Cloud/Infra', 'Mobile/Consumer', 'Other'];
 
 function AppContent() {
   const [news, setNews] = useState([]);
+  const [savedArticles, setSavedArticles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [currentQuery, setCurrentQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState('All');
+  const [view, setView] = useState('trending'); // 'trending' or 'saved'
 
-  const fetchNews = async (query = '') => {
+  const fetchNews = async (query = '', forceRefresh = false) => {
     setLoading(true);
     setError(null);
     setCurrentQuery(query);
-    setActiveCategory('All'); // Reset category on new fetch
+    setActiveCategory('All');
+    setView('trending');
 
     try {
       let url = '/api/v1/trending';
+      const params = [];
+
+      if (query) params.push(`q=${encodeURIComponent(query)}`);
+      if (forceRefresh) params.push('refresh=true');
+
       if (query) {
-        url = `/api/v1/trending/search?q=${encodeURIComponent(query)}`;
+        url = `/api/v1/trending/search?${params.join('&')}`;
+      } else if (forceRefresh) {
+        url = `/api/v1/trending?refresh=true`;
       }
 
-      const response = await axios.get(url);
+      const response = await axios.get(url, {
+        headers: { 'x-user-id': getUserId() }
+      });
 
-      // Handle different response structures
-      // Search returns { articles: [...] }
-      // Trending returns [ ... ] or { articles: [...] } depending on controller
       const data = response.data.articles || response.data || [];
-
       setNews(Array.isArray(data) ? data : []);
       setLastUpdated(new Date());
     } catch (err) {
@@ -45,14 +54,59 @@ function AppContent() {
     }
   };
 
+  const fetchSavedArticles = async () => {
+    setLoading(true);
+    setError(null);
+    setView('saved');
+    try {
+      const response = await axios.get('/api/v1/trending/saved', {
+        headers: { 'x-user-id': getUserId() }
+      });
+      setSavedArticles(response.data.articles || []);
+    } catch (err) {
+      console.error('Error fetching saved articles:', err);
+      setError('Failed to load saved articles.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSave = async (article) => {
+    console.log('handleSave called for:', article.title);
+    try {
+      await axios.post('/api/v1/trending/save', { article }, {
+        headers: { 'x-user-id': getUserId() }
+      });
+      console.log('Article saved successfully on server');
+      // Refresh saved articles list
+      const response = await axios.get('/api/v1/trending/saved', {
+        headers: { 'x-user-id': getUserId() }
+      });
+      setSavedArticles(response.data.articles || []);
+    } catch (err) {
+      console.error('Error saving article:', err);
+    }
+  };
+
   useEffect(() => {
     fetchNews();
+    // Initial fetch of saved articles to know which ones are saved
+    const loadInitialSaved = async () => {
+      try {
+        const response = await axios.get('/api/v1/trending/saved', {
+          headers: { 'x-user-id': getUserId() }
+        });
+        setSavedArticles(response.data.articles || []);
+      } catch (e) { }
+    };
+    loadInitialSaved();
   }, []);
 
-  // Client-side category filtering
+  const displayNews = view === 'trending' ? news : savedArticles;
+
   const filteredNews = activeCategory === 'All'
-    ? news
-    : news.filter(article =>
+    ? displayNews
+    : displayNews.filter(article =>
       article.ai_category && article.ai_category.includes(activeCategory.split('/')[0])
     );
 
@@ -71,7 +125,10 @@ function AppContent() {
       }}>
         <div className="container" style={{ height: '70px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '2rem' }}>
           {/* Logo */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 'fit-content' }}>
+          <div
+            onClick={() => fetchNews()}
+            style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 'fit-content', cursor: 'pointer' }}
+          >
             <div style={{
               background: 'var(--accent-gradient)',
               padding: '0.5rem',
@@ -85,16 +142,30 @@ function AppContent() {
             </h1>
           </div>
 
-          {/* Search Bar (Hidden on small mobile) */}
+          {/* Search Bar */}
           <div style={{ flex: 1, maxWidth: '500px' }} className="desktop-search">
             <SearchBar onSearch={fetchNews} />
           </div>
 
           {/* Actions */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-            <ThemeToggle />
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
             <button
-              onClick={() => fetchNews(currentQuery)}
+              onClick={() => view === 'trending' ? fetchSavedArticles() : fetchNews()}
+              className="btn"
+              style={{
+                background: view === 'saved' ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
+                color: view === 'saved' ? 'white' : 'var(--text-primary)',
+                gap: '0.5rem'
+              }}
+            >
+              {view === 'trending' ? <Bookmark size={18} /> : <TrendingUp size={18} />}
+              <span className="mobile-hide">{view === 'trending' ? 'Saved' : 'Trending'}</span>
+            </button>
+
+            <ThemeToggle />
+
+            <button
+              onClick={() => fetchNews(currentQuery, true)}
               className="btn"
               style={{
                 background: 'var(--bg-tertiary)',
@@ -111,22 +182,17 @@ function AppContent() {
         </div>
       </nav>
 
-      {/* Mobile Search (Visible only on mobile) */}
-      <div className="container mobile-search" style={{ marginBottom: '1.5rem', display: 'none' }}>
-        <SearchBar onSearch={fetchNews} />
-      </div>
-
       {/* Main Content */}
       <main className="container">
         <div style={{ marginBottom: '2rem' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'end', marginBottom: '1rem', flexWrap: 'wrap', gap: '1rem' }}>
             <div>
               <h2 style={{ fontSize: '2rem', fontWeight: '700', marginBottom: '0.5rem' }}>
-                {currentQuery ? `Results for "${currentQuery}"` : 'Trending Now'}
+                {view === 'saved' ? 'Your Saved Articles' : (currentQuery ? `Results for "${currentQuery}"` : 'Trending Now')}
               </h2>
               <p style={{ color: 'var(--text-secondary)' }}>
-                {currentQuery ? `Found ${news.length} articles` : 'Top tech stories curated by AI.'}
-                {lastUpdated && ` Updated at ${lastUpdated.toLocaleTimeString()}`}
+                {view === 'saved' ? `You have ${savedArticles.length} saved stories.` : (currentQuery ? `Found ${news.length} articles` : 'Top tech stories curated by AI.')}
+                {lastUpdated && view === 'trending' && ` Updated at ${lastUpdated.toLocaleTimeString()}`}
               </p>
             </div>
 
@@ -176,7 +242,13 @@ function AppContent() {
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: '2rem' }}>
             {filteredNews.map((article, index) => (
-              <NewsCard key={index} article={article} index={index} />
+              <NewsCard
+                key={article.link || index}
+                article={article}
+                index={index}
+                onSave={handleSave}
+                isSaved={savedArticles.some(a => a.link === article.link)}
+              />
             ))}
           </div>
         )}
@@ -184,7 +256,7 @@ function AppContent() {
         {!loading && filteredNews.length === 0 && !error && (
           <div style={{ textAlign: 'center', padding: '4rem 0', color: 'var(--text-secondary)' }}>
             <Filter size={48} style={{ marginBottom: '1rem', opacity: 0.5 }} />
-            <p style={{ fontSize: '1.25rem' }}>No articles found matching your criteria.</p>
+            <p style={{ fontSize: '1.25rem' }}>{view === 'saved' ? "You haven't saved any articles yet." : "No articles found matching your criteria."}</p>
             {activeCategory !== 'All' && (
               <button
                 onClick={() => setActiveCategory('All')}

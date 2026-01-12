@@ -115,7 +115,7 @@ async function searchNews(req, res) {
     const { q } = req.query;
     if (!q) return res.status(400).json({ message: 'Search query "q" is required.' });
 
-    const QUERY_CACHE_KEY = `search_cache:${q.toLowerCase().trim()}`;
+    const QUERY_CACHE_KEY = `search_cache:${req.userId}:${q.toLowerCase().trim()}`;
 
     try {
         // 1. Check Redis Cache
@@ -226,17 +226,128 @@ async function searchNews(req, res) {
 /**
  * GET /api/trending
  */
+const { fetchAndNormalizeNews } = require('../services/aggregator');
+
+/**
+ * GET /api/trending
+ */
+const AI_FILTERED_CACHE_KEY = 'trending_news_ai_filtered';
+const CACHE_EXPIRY_SECONDS = 3600;
+
+/**
+ * GET /api/trending
+ */
 async function getTrendingNews(req, res) {
     try {
-        const filteredArticles = await getCache(CACHE_KEY_TRENDING);
-        if (!filteredArticles) return res.status(404).json({ message: 'No data.' });
-        return res.json({
-            count: filteredArticles.length,
-            articles: filteredArticles.sort((a, b) => b.ai_score - a.ai_score)
-        });
+        const forceRefresh = req.query.refresh === 'true';
+
+        // 1. Check AI-filtered cache first (unless refreshing)
+        if (!forceRefresh) {
+            const cachedFilteredNews = await getCache(AI_FILTERED_CACHE_KEY);
+            if (cachedFilteredNews) {
+                logger.info('Returning AI-filtered results from cache.');
+                return res.json({
+                    count: cachedFilteredNews.length,
+                    articles: cachedFilteredNews
+                });
+            }
+        }
+
+        // 2. If no cache or forced refresh, fetch fresh data
+        logger.info('Cache miss or refresh requested. Fetching fresh news...');
+
+        // Fetch raw data from all sources
+        const rawNews = await fetchAndNormalizeNews();
+
+        if (!rawNews || rawNews.length === 0) {
+            return res.status(503).json({ message: 'Failed to fetch news from sources.' });
+        }
+
+        // 3. Process news in parallel using the AI model (Batch Mode)
+        // Deduplicate first
+        const uniqueArticles = deduplicateArticles(rawNews);
+
+        logger.info(`Starting AI filtering for ${uniqueArticles.length} articles...`);
+
+        // Limit to 20 for batch processing to save tokens/time
+        const scoredArticles = await batchScoreArticles(uniqueArticles.slice(0, 20));
+
+        // 4. Sort and Cache
+        if (scoredArticles.length > 0) {
+            // Filter low quality
+            const highQualityNews = scoredArticles
+                .filter(a => a.ai_score >= 3)
+                .sort((a, b) => b.ai_score - a.ai_score);
+
+            await setCache(AI_FILTERED_CACHE_KEY, highQualityNews, CACHE_EXPIRY_SECONDS);
+
+            return res.json({
+                count: highQualityNews.length,
+                articles: highQualityNews
+            });
+        }
+
+        return res.status(404).json({ message: 'No articles passed the AI filter.' });
+
     } catch (error) {
+        logger.error('Error in getTrendingNews:', error);
         return res.status(500).json({ message: 'Error fetching trending news.' });
     }
 }
 
-module.exports = { getTrendingNews, searchNews };
+
+
+/**
+ * POST /api/v1/trending/save
+ * Saves an article for a specific user
+ */
+async function saveArticle(req, res) {
+    try {
+        const { article } = req.body;
+        if (!article || !article.link) {
+            return res.status(400).json({ message: 'Article data with link is required.' });
+        }
+
+        const SAVED_CACHE_KEY = `saved_articles:${req.userId}`;
+
+        // Get existing saved articles
+        let saved = await getCache(SAVED_CACHE_KEY) || [];
+
+        // Check if already saved
+        if (saved.some(a => a.link === article.link)) {
+            return res.json({ message: 'Article already saved.', count: saved.length });
+        }
+
+        // Add to list
+        saved.push(article);
+
+        // Save back to Redis (no expiry for saved articles)
+        await setCache(SAVED_CACHE_KEY, saved, 0);
+
+        return res.json({ message: 'Article saved successfully.', count: saved.length });
+    } catch (error) {
+        logger.error('Save article error: ' + error.message);
+        return res.status(500).json({ message: 'Error saving article.' });
+    }
+}
+
+/**
+ * GET /api/v1/trending/saved
+ * Retrieves saved articles for a specific user
+ */
+async function getSavedArticles(req, res) {
+    try {
+        const SAVED_CACHE_KEY = `saved_articles:${req.userId}`;
+        const saved = await getCache(SAVED_CACHE_KEY) || [];
+
+        return res.json({
+            count: saved.length,
+            articles: saved
+        });
+    } catch (error) {
+        logger.error('Get saved articles error: ' + error.message);
+        return res.status(500).json({ message: 'Error fetching saved articles.' });
+    }
+}
+
+module.exports = { getTrendingNews, searchNews, saveArticle, getSavedArticles };
