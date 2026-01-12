@@ -3,18 +3,30 @@ const { fetchRedditNews } = require('../src/services/fetchers/reddit');
 const { fetchHackerNews } = require('../src/services/fetchers/hackernews');
 const { fetchNewsData } = require('../src/services/fetchers/newsdata');
 
-async function testAll() {
-  console.log('--- Testing Reddit ---');
-  const reddit = await fetchRedditNews();
-  console.log(reddit[0]); // Print first item to verify structure
+describe('Manual Fetchers', () => {
+  test('should fetch Reddit news', async () => {
+    const reddit = await fetchRedditNews();
+    expect(Array.isArray(reddit)).toBe(true);
+    if (reddit.length > 0) {
+      expect(reddit[0]).toHaveProperty('title');
+    }
+  }, 30000);
 
-  console.log('\n--- Testing HackerNews ---');
-  const hn = await fetchHackerNews();
-  console.log(hn[0]);
+  test('should fetch HackerNews', async () => {
+    const hn = await fetchHackerNews();
+    expect(Array.isArray(hn)).toBe(true);
+    if (hn.length > 0) {
+      expect(hn[0]).toHaveProperty('title');
+    }
+  }, 30000);
 
-  console.log('\n--- Testing NewsData ---');
-  const nd = await fetchNewsData();
-  console.log(nd[0]);
-}
-
-testAll();
+  test('should fetch NewsData', async () => {
+    const nd = await fetchNewsData();
+    if (nd) {
+      expect(Array.isArray(nd)).toBe(true);
+      if (nd.length > 0) {
+        expect(nd[0]).toHaveProperty('title');
+      }
+    }
+  }, 30000);
+});

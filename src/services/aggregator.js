@@ -2,6 +2,8 @@
 
 const { fetchHackerNews } = require('./fetchers/hackernews');
 const { fetchNewsData } = require('./fetchers/newsdata');
+const { fetchRedditNews } = require('./fetchers/reddit');
+const { fetchGNews } = require('./fetchers/gnews');
 const { logger } = require('../utils/logger');
 
 /**
@@ -14,21 +16,22 @@ function normalizeArticle(article) {
     if (!article) return null;
 
     // Use common properties from different APIs and map them to our standards
-    const title = article.title || article.headline || article.name; 
+    const title = article.title || article.headline || article.name;
     const link = article.link || article.url || article.link_url;
 
     // Expanded description fields (the temporary log showed these were mostly missing)
-    let description = article.description 
-                      || article.contentSnippet 
-                      || article.summary 
-                      || article.text 
-                      || article.content 
-                      || article['content:encoded']; 
-    
+    let description = article.description
+        || article.contentSnippet
+        || article.summary
+        || article.text
+        || article.content
+        || article.content_encoded
+        || article['content:encoded'];
+
     // --- CRITICAL FIX: FINAL MAPPING FALLBACK ---
     if (!description && title) {
         // If the article has a title but no summary field, use the title as the description.
-        description = `Article about: ${title}`; 
+        description = `Article about: ${title}`;
     }
     // --------------------------------------------
 
@@ -43,9 +46,9 @@ function normalizeArticle(article) {
         title: title.trim(),
         description: description.trim(), // Guaranteed to have a value now
         link: link.trim(),
-        
+
         // Retain source info
-        source: article.source || 'Unknown', 
+        source: article.source || 'Unknown',
         pubDate: article.pubDate || null
     };
 }
@@ -60,22 +63,26 @@ async function fetchAndNormalizeNews() {
 
     try {
         // 1. Fetch data from only the WORKING sources in parallel
-        const [hackerNewsArticles, newsDataArticles] = await Promise.all([
+        const [hackerNewsArticles, newsDataArticles, redditArticles, gNewsArticles] = await Promise.all([
             fetchHackerNews(),
             fetchNewsData(),
+            fetchRedditNews(),
+            fetchGNews(),
         ]);
 
         // 2. Combine all raw articles into one array
         const allRawArticles = [
-            ...hackerNewsArticles, 
-            ...newsDataArticles
+            ...hackerNewsArticles,
+            ...newsDataArticles,
+            ...redditArticles,
+            ...gNewsArticles
         ].flat().filter(Boolean);
 
         // 3. Normalize and filter the articles
         const normalizedArticles = allRawArticles
             .map(normalizeArticle)
             .filter(article => article !== null);
-        
+
         return normalizedArticles;
 
     } catch (error) {

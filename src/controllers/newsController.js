@@ -1,17 +1,17 @@
 const axios = require('axios');
 const Groq = require('groq-sdk');
-const { getCache, setCache } = require('../utils/cache'); 
+const { getCache, setCache } = require('../utils/cache');
 const { logger } = require('../utils/logger');
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY }); 
-const CACHE_KEY_TRENDING = 'trending_news_ai_filtered'; 
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const CACHE_KEY_TRENDING = 'trending_news_ai_filtered';
 
 /**
  * 1. HELPER: Universal Normalizer
  */
 function normalizeArticle(article, sourceName) {
     const item = article.data || article;
-    
+
     let link = item.link || item.url;
     let source = sourceName || item.source_id || "Unknown";
     let date = item.pubDate || item.publishedAt;
@@ -54,7 +54,7 @@ function deduplicateArticles(articles) {
 async function batchScoreArticles(articles) {
     if (!articles || articles.length === 0) return [];
 
-    const articlesList = articles.map((a, i) => 
+    const articlesList = articles.map((a, i) =>
         `ID: ${i}\nTitle: ${a.title}\nDescription: ${a.description.substring(0, 150)}`
     ).join('\n---\n');
 
@@ -132,11 +132,11 @@ async function searchNews(req, res) {
         if (process.env.NEWSDATA_API_KEY) {
             apiTasks.push(
                 axios.get(`https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}&qInTitle=${encodeURIComponent(q)}&language=en&size=10`)
-                .then(r => {
-                    logger.info(`[API USAGE] NewsData: Success | Results: ${r.data.totalResults || 0}`);
-                    return (r.data.results || []).map(a => normalizeArticle(a, 'NewsData'));
-                })
-                .catch(e => { logger.error(`NewsData failed: ${e.message}`); return []; })
+                    .then(r => {
+                        logger.info(`[API USAGE] NewsData: Success | Results: ${r.data.totalResults || 0}`);
+                        return (r.data.results || []).map(a => normalizeArticle(a, 'NewsData'));
+                    })
+                    .catch(e => { logger.error(`NewsData failed: ${e.message}`); return []; })
             );
         }
 
@@ -144,26 +144,46 @@ async function searchNews(req, res) {
         if (process.env.GNEWS_API_KEY) {
             apiTasks.push(
                 axios.get(`https://gnews.io/api/v4/search?q=${encodeURIComponent(q)}&token=${process.env.GNEWS_API_KEY}&lang=en`)
-                .then(r => {
-                    logger.info(`[API USAGE] GNews: Success`);
-                    return (r.data.articles || []).map(a => normalizeArticle(a, 'GNews'));
-                })
-                .catch(e => { logger.error(`GNews failed: ${e.message}`); return []; })
+                    .then(r => {
+                        logger.info(`[API USAGE] GNews: Success`);
+                        return (r.data.articles || []).map(a => normalizeArticle(a, 'GNews'));
+                    })
+                    .catch(e => { logger.error(`GNews failed: ${e.message}`); return []; })
             );
         }
 
         // Reddit: Tracking Rate Limits
         apiTasks.push(
             axios.get(`https://www.reddit.com/search.json?q=${encodeURIComponent(q)}&limit=12&sort=relevance&t=month`, {
-                headers: { 'User-Agent': 'AI-News-Aggregator/1.0' } 
+                headers: { 'User-Agent': 'AI-News-Aggregator/1.0' }
             })
-            .then(r => {
-                const remaining = r.headers['x-ratelimit-remaining'];
-                const reset = r.headers['x-ratelimit-reset'];
-                logger.info(`[API USAGE] Reddit: Success | RateLimit Remaining: ${remaining} | Resets in: ${reset}s`);
-                return (r.data.data.children || []).map(a => normalizeArticle(a, 'Reddit'));
-            })
-            .catch(e => { logger.error(`Reddit failed: ${e.message}`); return []; })
+                .then(r => {
+                    const remaining = r.headers['x-ratelimit-remaining'];
+                    const reset = r.headers['x-ratelimit-reset'];
+                    logger.info(`[API USAGE] Reddit: Success | RateLimit Remaining: ${remaining} | Resets in: ${reset}s`);
+                    return (r.data.data.children || []).map(a => normalizeArticle(a, 'Reddit'));
+                })
+                .catch(e => { logger.error(`Reddit failed: ${e.message}`); return []; })
+        );
+
+        // HackerNews (Algolia API)
+        apiTasks.push(
+            axios.get(`http://hn.algolia.com/api/v1/search?query=${encodeURIComponent(q)}&tags=story&hitsPerPage=10`)
+                .then(r => {
+                    logger.info(`[API USAGE] HackerNews: Success | Results: ${r.data.nbHits}`);
+                    return (r.data.hits || []).map(a => ({
+                        title: a.title,
+                        description: a.story_text || `Discussion on HackerNews about ${a.title}`,
+                        link: a.url || `https://news.ycombinator.com/item?id=${a.objectID}`,
+                        source: 'HackerNews',
+                        pubDate: a.created_at,
+                        ai_score: 1,
+                        ai_summary: '',
+                        ai_category: '',
+                        sentiment: 'Neutral'
+                    }));
+                })
+                .catch(e => { logger.error(`HackerNews search failed: ${e.message}`); return []; })
         );
 
         // 3. Resolve Parallel Requests
@@ -210,9 +230,9 @@ async function getTrendingNews(req, res) {
     try {
         const filteredArticles = await getCache(CACHE_KEY_TRENDING);
         if (!filteredArticles) return res.status(404).json({ message: 'No data.' });
-        return res.json({ 
-            count: filteredArticles.length, 
-            articles: filteredArticles.sort((a, b) => b.ai_score - a.ai_score) 
+        return res.json({
+            count: filteredArticles.length,
+            articles: filteredArticles.sort((a, b) => b.ai_score - a.ai_score)
         });
     } catch (error) {
         return res.status(500).json({ message: 'Error fetching trending news.' });
